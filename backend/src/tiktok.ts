@@ -5,16 +5,50 @@ import { getSettings } from "./database.js";
 import { calculateGiftAddedMs, getPublicTimerState, recordContribution } from "./timer-service.js";
 
 type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
-type GiftEvent = {
+export interface GiftEvent {
+  common?: { msgId?: string };
   user?: { uniqueId?: string; userId?: string; nickname?: string };
-  giftId?: number;
-  giftName?: string;
+  giftId?: number | string;
+  gift?: { name?: string; diamondCount?: number; type?: number };
   giftDetails?: { giftName?: string; diamondCount?: number; giftType?: number };
-  diamondCount?: number;
   repeatCount?: number;
-  repeatEnd?: boolean;
+  repeatEnd?: boolean | number;
   msgId?: string;
-};
+  orderId?: string;
+}
+
+export interface GiftContribution {
+  eventId: string;
+  senderId: string;
+  senderName: string;
+  giftName: string;
+  coins: number;
+  addedMs: number;
+}
+
+export function getGiftContribution(event: GiftEvent): GiftContribution | null {
+  const giftType = event.gift?.type ?? event.giftDetails?.giftType;
+  if (giftType === 1 && !event.repeatEnd) return null;
+
+  const repeatCount = Math.max(1, Math.floor(event.repeatCount ?? 1));
+  const coinValue = event.gift?.diamondCount ?? event.giftDetails?.diamondCount ?? 0;
+  const coins = Math.max(0, Math.floor(coinValue)) * repeatCount;
+  if (coins <= 0) return null;
+
+  const senderId = event.user?.userId ?? event.user?.uniqueId ?? "unknown";
+  const senderName = event.user?.nickname ?? event.user?.uniqueId ?? "TikTok viewer";
+  const giftName = event.gift?.name ?? event.giftDetails?.giftName ?? `Gift ${event.giftId ?? ""}`.trim();
+  const eventId = event.common?.msgId ?? event.msgId ?? event.orderId ?? randomUUID();
+
+  return {
+    eventId,
+    senderId,
+    senderName,
+    giftName,
+    coins,
+    addedMs: calculateGiftAddedMs(coins)
+  };
+}
 
 export class TikTokListener {
   private connection: TikTokLiveConnection | undefined;
@@ -75,18 +109,10 @@ export class TikTokListener {
   }
 
   private handleGift(event: GiftEvent): void {
-    // Only streakable gifts send progressive repeats; non-streak gifts are credited immediately.
-    if (event.giftDetails?.giftType === 1 && !event.repeatEnd) return;
-    const repeatCount = Math.max(1, Math.floor(event.repeatCount ?? 1));
-    const coins = Math.max(0, Math.floor(event.giftDetails?.diamondCount ?? event.diamondCount ?? 0)) * repeatCount;
-    if (coins <= 0) return;
-    const user = event.user;
-    const senderId = user?.userId ?? user?.uniqueId ?? "unknown";
-    const senderName = user?.nickname ?? user?.uniqueId ?? "TikTok viewer";
-    const giftName = event.giftDetails?.giftName ?? event.giftName ?? `Gift ${event.giftId ?? ""}`.trim();
-    const eventId = event.msgId ?? randomUUID();
-    const addedMs = calculateGiftAddedMs(coins);
-    const state = recordContribution({ kind: "gift", eventId, senderId, senderName, giftName, coins, addedMs });
+    const contribution = getGiftContribution(event);
+    if (!contribution) return;
+    const { eventId, senderId, senderName, giftName, coins, addedMs } = contribution;
+    const state = recordContribution({ kind: "gift", ...contribution });
     if (!state) return;
     this.io.emit("timer:update", state);
     this.io.emit("activity:new", {
